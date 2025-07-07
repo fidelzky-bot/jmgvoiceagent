@@ -2,13 +2,11 @@ import asyncio
 import base64
 import json
 import sys
-import websockets
 import ssl
 import os
 import logging
 from twilio.rest import Client
 from urllib.parse import urlparse, parse_qs
-import threading
 from aiohttp import web
 
 # Configure logging
@@ -37,8 +35,17 @@ def sts_connect():
     )
     return sts_ws
 
+async def health(request):
+    return web.Response(text="OK")
 
-async def twilio_handler(twilio_ws, call_sid=None):
+async def twilio_ws_handler(request):
+    ws = web.WebSocketResponse()
+    await ws.prepare(request)
+
+    # Extract call_sid from query string
+    call_sid = request.query.get('callsid')
+    logger.info(f"WebSocket connection on /twilio with call_sid: {call_sid}")
+
     audio_queue = asyncio.Queue()
     streamsid_queue = asyncio.Queue()
 
@@ -76,30 +83,25 @@ async def twilio_handler(twilio_ws, call_sid=None):
 
         await sts_ws.send(json.dumps(config_message))
 
-        async def sts_sender(sts_ws):
+        async def sts_sender():
             logger.info("sts_sender started")
             while True:
                 chunk = await audio_queue.get()
                 await sts_ws.send(chunk)
 
-        async def sts_receiver(sts_ws):
+        async def sts_receiver():
             logger.info("sts_receiver started")
-            # we will wait until the twilio ws connection figures out the streamsid
             streamsid = await streamsid_queue.get()
-            # for each sts result received, forward it on to the call
             async for message in sts_ws:
                 if type(message) is str:
                     logger.debug(f"STS message: {message}")
-                    # handle barge-in
                     decoded = json.loads(message)
-                    if decoded['type'] == 'UserStartedSpeaking':
+                    if decoded.get('type') == 'UserStartedSpeaking':
                         clear_message = {
                             "event": "clear",
                             "streamSid": streamsid
                         }
-                        await twilio_ws.send(json.dumps(clear_message))
-
-                    # Detect transfer intent
+                        await ws.send_json(clear_message)
                     if (
                         decoded.get("type") == "AgentResponse"
                         and "transfer you to our main office" in decoded.get("text", "").lower()
@@ -116,116 +118,67 @@ async def twilio_handler(twilio_ws, call_sid=None):
                             logger.info(f"Call {call_sid} transferred to {TRANSFER_PHONE_NUMBER}")
                         except Exception as e:
                             logger.error(f"Failed to transfer call: {e}")
-
                     continue
-
                 logger.debug(f"STS audio message type: {type(message)}")
                 raw_mulaw = message
-
-                # construct a Twilio media message with the raw mulaw (see https://www.twilio.com/docs/voice/twiml/stream#websocket-messages---to-twilio)
                 media_message = {
                     "event": "media",
                     "streamSid": streamsid,
                     "media": {"payload": base64.b64encode(raw_mulaw).decode("ascii")},
                 }
+                await ws.send_json(media_message)
 
-                # send the TTS audio to the attached phonecall
-                await twilio_ws.send(json.dumps(media_message))
-
-        async def twilio_receiver(twilio_ws):
+        async def twilio_receiver():
             logger.info("twilio_receiver started")
-            # twilio sends audio data as 160 byte messages containing 20ms of audio each
-            # we will buffer 20 twilio messages corresponding to 0.4 seconds of audio to improve throughput performance
             BUFFER_SIZE = 20 * 160
-
             inbuffer = bytearray(b"")
-            async for message in twilio_ws:
-                try:
-                    data = json.loads(message)
-                    if data["event"] == "start":
-                        logger.info("got our streamsid")
-                        start = data["start"]
-                        streamsid = start["streamSid"]
-                        streamsid_queue.put_nowait(streamsid)
-                    if data["event"] == "connected":
-                        continue
-                    if data["event"] == "media":
-                        media = data["media"]
-                        chunk = base64.b64decode(media["payload"])
-                        if media["track"] == "inbound":
-                            inbuffer.extend(chunk)
-                    if data["event"] == "stop":
+            async for msg in ws:
+                if msg.type == web.WSMsgType.TEXT:
+                    try:
+                        data = json.loads(msg.data)
+                        if data["event"] == "start":
+                            logger.info("got our streamsid")
+                            start = data["start"]
+                            streamsid = start["streamSid"]
+                            streamsid_queue.put_nowait(streamsid)
+                        if data["event"] == "connected":
+                            continue
+                        if data["event"] == "media":
+                            media = data["media"]
+                            chunk = base64.b64decode(media["payload"])
+                            if media["track"] == "inbound":
+                                inbuffer.extend(chunk)
+                        if data["event"] == "stop":
+                            break
+                        while len(inbuffer) >= BUFFER_SIZE:
+                            chunk = inbuffer[:BUFFER_SIZE]
+                            audio_queue.put_nowait(chunk)
+                            inbuffer = inbuffer[BUFFER_SIZE:]
+                    except json.JSONDecodeError as e:
+                        logger.error(f"Error decoding JSON message: {e}")
                         break
-
-                    # check if our buffer is ready to send to our audio_queue (and, thus, then to sts)
-                    while len(inbuffer) >= BUFFER_SIZE:
-                        chunk = inbuffer[:BUFFER_SIZE]
-                        audio_queue.put_nowait(chunk)
-                        inbuffer = inbuffer[BUFFER_SIZE:]
-                except json.JSONDecodeError as e:
-                    logger.error(f"Error decoding JSON message: {e}")
+                    except Exception as e:
+                        logger.error(f"Unexpected error in twilio_receiver: {e}")
+                        break
+                elif msg.type == web.WSMsgType.ERROR:
+                    logger.error(f'ws connection closed with exception {ws.exception()}')
                     break
-                except Exception as e:
-                    logger.error(f"Unexpected error in twilio_receiver: {e}")
-                    break
+            await ws.close()
 
-        # the async for loop will end if the ws connection from twilio dies
-        # and if this happens, we should forward an some kind of message to sts
-        # to signal sts to send back remaining messages before closing(?)
-        # audio_queue.put_nowait(b'')
-
-        try:
-            await asyncio.wait(
-                [
-                    asyncio.ensure_future(sts_sender(sts_ws)),
-                    asyncio.ensure_future(sts_receiver(sts_ws)),
-                    asyncio.ensure_future(twilio_receiver(twilio_ws)),
-                ]
-            )
-        except Exception as e:
-            logger.error(f"Error in main handler loop: {e}")
-        finally:
-            await twilio_ws.close()
-            logger.info("Twilio WebSocket connection closed")
-
-
-async def router(websocket, path):
-    logger.info(f"Incoming connection on path: {path}")
-    call_sid = None
-    if '?' in path:
-        parsed = urlparse(path)
-        params = parse_qs(parsed.query)
-        call_sid = params.get('callsid', [None])[0]
-    logger.info(f"Parsed call_sid: {call_sid}")
-    if path.startswith("/twilio"):
-        logger.info("Starting Twilio handler")
-        await twilio_handler(websocket, call_sid)
+        await asyncio.gather(
+            sts_sender(),
+            sts_receiver(),
+            twilio_receiver(),
+        )
+    return ws
 
 def main():
     port = int(os.environ.get("PORT", 10000))
-
-    # Set up aiohttp app for health check
-    async def health(request):
-        return web.Response(text="OK")
     app = web.Application()
     app.router.add_get("/", health)
-    runner = web.AppRunner(app)
-
-    async def start():
-        # Start HTTP server
-        await runner.setup()
-        site = web.TCPSite(runner, "0.0.0.0", port)
-        await site.start()
-        logger.info(f"HTTP health check running on http://0.0.0.0:{port}/")
-
-        # Start WebSocket server
-        ws_server = await websockets.serve(router, "0.0.0.0", port)
-        logger.info(f"WebSocket server starting on ws://0.0.0.0:{port}")
-
-        await asyncio.Future()  # run forever
-
-    asyncio.run(start())
-
+    app.router.add_get("/twilio", twilio_ws_handler)
+    app.router.add_post("/twilio", twilio_ws_handler)
+    web.run_app(app, port=port)
 
 if __name__ == "__main__":
     sys.exit(main() or 0)
