@@ -210,8 +210,11 @@ def main():
     server = websockets.serve(router, "0.0.0.0", port)
     logger.info(f"Server starting on ws://0.0.0.0:{port}")
 
-    asyncio.get_event_loop().run_until_complete(server)
-    asyncio.get_event_loop().run_forever()
+    async def start():
+        await server
+        await asyncio.Future()  # run forever
+
+    asyncio.run(start())
 
 
 if __name__ == "__main__":
