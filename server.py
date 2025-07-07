@@ -201,32 +201,27 @@ async def router(websocket, path):
         logger.info("Starting Twilio handler")
         await twilio_handler(websocket, call_sid)
 
-def start_http_server():
+def main():
+    port = int(os.environ.get("PORT", 10000))
+
+    # Set up aiohttp app for health check
     async def health(request):
         return web.Response(text="OK")
     app = web.Application()
     app.router.add_get("/", health)
-    port = int(os.environ.get("PORT", 10000))
-    web.run_app(app, port=port)
-
-
-def main():
-    # use this if using ssl
-    # ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    # ssl_context.load_cert_chain('cert.pem', 'key.pem')
-    # server = websockets.serve(router, '0.0.0.0', 443, ssl=ssl_context)
-
-    # use this if not using ssl
-    port = int(os.environ.get("PORT", 10000))
-    server = websockets.serve(router, "0.0.0.0", port)
-    logger.info(f"Server starting on ws://0.0.0.0:{port}")
-
-    # Start HTTP health check server in a separate thread
-    http_thread = threading.Thread(target=start_http_server, daemon=True)
-    http_thread.start()
+    runner = web.AppRunner(app)
 
     async def start():
-        await server
+        # Start HTTP server
+        await runner.setup()
+        site = web.TCPSite(runner, "0.0.0.0", port)
+        await site.start()
+        logger.info(f"HTTP health check running on http://0.0.0.0:{port}/")
+
+        # Start WebSocket server
+        ws_server = await websockets.serve(router, "0.0.0.0", port)
+        logger.info(f"WebSocket server starting on ws://0.0.0.0:{port}")
+
         await asyncio.Future()  # run forever
 
     asyncio.run(start())
