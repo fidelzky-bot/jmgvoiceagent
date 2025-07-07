@@ -194,7 +194,8 @@ async def router(websocket, path):
         parsed = urlparse(path)
         params = parse_qs(parsed.query)
         call_sid = params.get('callsid', [None])[0]
-    if path == "/twilio":
+    logger.info(f"Parsed call_sid: {call_sid}")
+    if path.startswith("/twilio"):
         logger.info("Starting Twilio handler")
         await twilio_handler(websocket, call_sid)
 
