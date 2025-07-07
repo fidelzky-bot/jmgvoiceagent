@@ -190,7 +190,7 @@ async def twilio_ws_handler(request):
     return ws
 
 def main():
-    port = int(os.environ.get("PORT", 10000))
+    port = int(os.environ.get("PORT", 8080))
     app = web.Application()
     app.router.add_get("/", health)
     app.router.add_get("/twilio", twilio_ws_handler)
