@@ -174,8 +174,9 @@ def main():
     # server = websockets.serve(router, '0.0.0.0', 443, ssl=ssl_context)
 
     # use this if not using ssl
-    server = websockets.serve(router, "localhost", 5000)
-    logger.info("Server starting on ws://localhost:5000")
+    port = int(os.environ.get("PORT", 5000))
+    server = websockets.serve(router, "0.0.0.0", port)
+    logger.info(f"Server starting on ws://0.0.0.0:{port}")
 
     asyncio.get_event_loop().run_until_complete(server)
     asyncio.get_event_loop().run_forever()
