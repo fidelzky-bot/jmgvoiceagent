@@ -6,6 +6,8 @@ import websockets
 import ssl
 import os
 import logging
+from twilio.rest import Client
+from urllib.parse import urlparse, parse_qs
 
 # Configure logging
 logging.basicConfig(
@@ -14,6 +16,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
+TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
+TRANSFER_PHONE_NUMBER = os.getenv("TRANSFER_PHONE_NUMBER")
+client = None
+if TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN:
+    client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
 
 def sts_connect():
     # you can run export DEEPGRAM_API_KEY="your key" in your terminal to set your API key.
@@ -28,7 +36,7 @@ def sts_connect():
     return sts_ws
 
 
-async def twilio_handler(twilio_ws):
+async def twilio_handler(twilio_ws, call_sid=None):
     audio_queue = asyncio.Queue()
     streamsid_queue = asyncio.Queue()
 
@@ -88,6 +96,24 @@ async def twilio_handler(twilio_ws):
                             "streamSid": streamsid
                         }
                         await twilio_ws.send(json.dumps(clear_message))
+
+                    # Detect transfer intent
+                    if (
+                        decoded.get("type") == "AgentResponse"
+                        and "transfer you to our main office" in decoded.get("text", "").lower()
+                        and call_sid and client and TRANSFER_PHONE_NUMBER
+                    ):
+                        logger.info("Transfer intent detected, redirecting call...")
+                        response = f"""
+                        <Response>
+                            <Dial>{TRANSFER_PHONE_NUMBER}</Dial>
+                        </Response>
+                        """
+                        try:
+                            client.calls(call_sid).update(twiml=response)
+                            logger.info(f"Call {call_sid} transferred to {TRANSFER_PHONE_NUMBER}")
+                        except Exception as e:
+                            logger.error(f"Failed to transfer call: {e}")
 
                     continue
 
@@ -163,9 +189,14 @@ async def twilio_handler(twilio_ws):
 
 async def router(websocket, path):
     logger.info(f"Incoming connection on path: {path}")
+    call_sid = None
+    if '?' in path:
+        parsed = urlparse(path)
+        params = parse_qs(parsed.query)
+        call_sid = params.get('callsid', [None])[0]
     if path == "/twilio":
         logger.info("Starting Twilio handler")
-        await twilio_handler(websocket)
+        await twilio_handler(websocket, call_sid)
 
 def main():
     # use this if using ssl
