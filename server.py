@@ -96,49 +96,54 @@ async def twilio_ws_handler(request):
 
         async def sts_receiver():
             logger.info("sts_receiver started")
-            streamsid = await streamsid_queue.get()
-            async for message in sts_ws:
-                logger.info(f"sts_receiver: received message from Deepgram of type {type(message)}")
-                if type(message) is str:
-                    logger.debug(f"STS message: {message}")
-                    decoded = json.loads(message)
-                    if decoded.get('type') == 'UserStartedSpeaking':
-                        clear_message = {
-                            "event": "clear",
-                            "streamSid": streamsid
-                        }
-                        logger.info("sts_receiver: sending clear message to Twilio")
-                        await ws.send_json(clear_message)
-                    if (
-                        decoded.get("type") == "AgentResponse"
-                        and "transfer you to our main office" in decoded.get("text", "").lower()
-                        and call_sid is not None and client and TRANSFER_PHONE_NUMBER
-                    ):
-                        logger.info("Transfer intent detected, redirecting call...")
-                        response = f"""
-                        <Response>
-                            <Dial>{TRANSFER_PHONE_NUMBER}</Dial>
-                        </Response>
-                        """
-                        try:
-                            client.calls(call_sid).update(twiml=response)
-                            logger.info(f"Call {call_sid} transferred to {TRANSFER_PHONE_NUMBER}")
-                        except Exception as e:
-                            logger.error(f"Failed to transfer call: {e}")
-                    continue
-                logger.debug(f"STS audio message type: {type(message)}")
-                raw_mulaw = message
-                media_message = {
-                    "event": "media",
-                    "streamSid": streamsid,
-                    "media": {"payload": base64.b64encode(raw_mulaw).decode("ascii")},
-                }
-                logger.info(f"sts_receiver: sending TTS audio to Twilio, size {len(raw_mulaw)} bytes")
-                await ws.send_json(media_message)
+            try:
+                streamsid = await streamsid_queue.get()
+                async for message in sts_ws:
+                    logger.info(f"sts_receiver: received message from Deepgram of type {type(message)}")
+                    if type(message) is str:
+                        logger.debug(f"STS message: {message}")
+                        decoded = json.loads(message)
+                        if decoded.get('type') == 'UserStartedSpeaking':
+                            clear_message = {
+                                "event": "clear",
+                                "streamSid": streamsid
+                            }
+                            logger.info("sts_receiver: sending clear message to Twilio")
+                            await ws.send_json(clear_message)
+                        if (
+                            decoded.get("type") == "AgentResponse"
+                            and "transfer you to our main office" in decoded.get("text", "").lower()
+                            and call_sid is not None and client and TRANSFER_PHONE_NUMBER
+                        ):
+                            logger.info("Transfer intent detected, redirecting call...")
+                            response = f"""
+                            <Response>
+                                <Dial>{TRANSFER_PHONE_NUMBER}</Dial>
+                            </Response>
+                            """
+                            try:
+                                client.calls(call_sid).update(twiml=response)
+                                logger.info(f"Call {call_sid} transferred to {TRANSFER_PHONE_NUMBER}")
+                            except Exception as e:
+                                logger.error(f"Failed to transfer call: {e}")
+                        continue
+                    logger.debug(f"STS audio message type: {type(message)}")
+                    raw_mulaw = message
+                    media_message = {
+                        "event": "media",
+                        "streamSid": streamsid,
+                        "media": {"payload": base64.b64encode(raw_mulaw).decode("ascii")},
+                    }
+                    logger.info(f"sts_receiver: sending TTS audio to Twilio, size {len(raw_mulaw)} bytes")
+                    await ws.send_json(media_message)
+                logger.info("sts_receiver: Deepgram connection closed or no messages received.")
+            except Exception as e:
+                logger.error(f"sts_receiver: Exception occurred: {e}")
 
         async def twilio_receiver():
             logger.info("twilio_receiver started")
-            BUFFER_SIZE = 20 * 160
+            # Reduce buffer size for lower latency
+            BUFFER_SIZE = 160  # 1 chunk = 20ms of audio
             inbuffer = bytearray(b"")
             async for msg in ws:
                 logger.info(f"twilio_receiver: received message from Twilio: {msg.data if hasattr(msg, 'data') else msg}")
