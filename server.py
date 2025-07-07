@@ -88,12 +88,14 @@ async def twilio_ws_handler(request):
             logger.info("sts_sender started")
             while True:
                 chunk = await audio_queue.get()
+                logger.info(f"sts_sender: sending audio chunk of size {len(chunk)} bytes to Deepgram")
                 await sts_ws.send(chunk)
 
         async def sts_receiver():
             logger.info("sts_receiver started")
             streamsid = await streamsid_queue.get()
             async for message in sts_ws:
+                logger.info(f"sts_receiver: received message from Deepgram of type {type(message)}")
                 if type(message) is str:
                     logger.debug(f"STS message: {message}")
                     decoded = json.loads(message)
@@ -102,6 +104,7 @@ async def twilio_ws_handler(request):
                             "event": "clear",
                             "streamSid": streamsid
                         }
+                        logger.info("sts_receiver: sending clear message to Twilio")
                         await ws.send_json(clear_message)
                     if (
                         decoded.get("type") == "AgentResponse"
@@ -127,6 +130,7 @@ async def twilio_ws_handler(request):
                     "streamSid": streamsid,
                     "media": {"payload": base64.b64encode(raw_mulaw).decode("ascii")},
                 }
+                logger.info(f"sts_receiver: sending TTS audio to Twilio, size {len(raw_mulaw)} bytes")
                 await ws.send_json(media_message)
 
         async def twilio_receiver():
@@ -134,6 +138,7 @@ async def twilio_ws_handler(request):
             BUFFER_SIZE = 20 * 160
             inbuffer = bytearray(b"")
             async for msg in ws:
+                logger.info(f"twilio_receiver: received message from Twilio: {msg.data if hasattr(msg, 'data') else msg}")
                 if msg.type == web.WSMsgType.TEXT:
                     try:
                         data = json.loads(msg.data)
@@ -147,12 +152,15 @@ async def twilio_ws_handler(request):
                         if data["event"] == "media":
                             media = data["media"]
                             chunk = base64.b64decode(media["payload"])
+                            logger.info(f"twilio_receiver: received media chunk of size {len(chunk)} bytes from Twilio")
                             if media["track"] == "inbound":
                                 inbuffer.extend(chunk)
                         if data["event"] == "stop":
+                            logger.info("twilio_receiver: received stop event from Twilio")
                             break
                         while len(inbuffer) >= BUFFER_SIZE:
                             chunk = inbuffer[:BUFFER_SIZE]
+                            logger.info(f"twilio_receiver: sending buffered audio chunk of size {len(chunk)} bytes to audio_queue")
                             audio_queue.put_nowait(chunk)
                             inbuffer = inbuffer[BUFFER_SIZE:]
                     except json.JSONDecodeError as e:
