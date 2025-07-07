@@ -45,7 +45,10 @@ async def twilio_ws_handler(request):
 
     # Extract call_sid from query string
     call_sid = request.query.get('callsid')
-    logger.info(f"WebSocket connection on /twilio with call_sid: {call_sid}")
+    if not call_sid:
+        logger.warning("No call_sid provided in query string.")
+    else:
+        logger.info(f"WebSocket connection on /twilio with call_sid: {call_sid}")
 
     audio_queue = asyncio.Queue()
     streamsid_queue = asyncio.Queue()
@@ -109,7 +112,7 @@ async def twilio_ws_handler(request):
                     if (
                         decoded.get("type") == "AgentResponse"
                         and "transfer you to our main office" in decoded.get("text", "").lower()
-                        and call_sid and client and TRANSFER_PHONE_NUMBER
+                        and call_sid is not None and client and TRANSFER_PHONE_NUMBER
                     ):
                         logger.info("Transfer intent detected, redirecting call...")
                         response = f"""
